@@ -59,6 +59,16 @@
       <div id="latency" class="row small dim">last tap –</div>
     </div>
 
+    <!-- Kalshi's view of the account (not the engine's). Tap for the full portfolio. -->
+    <button id="account" class="account">
+      <div class="row">
+        <span>Cash <b id="cash">–</b></span>
+        <span>Open P&amp;L <b id="open-pnl">–</b></span>
+      </div>
+      <div id="here" class="row here">no position in this game</div>
+      <div id="others" class="small dim"></div>
+    </button>
+
     <div class="pads">
       <button id="up" class="pad up"><span class="arrow">▲</span><span id="up-label">TEAM A</span><span class="sub">good</span></button>
       <button id="down" class="pad down"><span class="arrow">▼</span><span id="down-label">TEAM A</span><span class="sub">bad</span></button>
@@ -78,6 +88,17 @@
     </div>
     <p class="dim small">Tap the team that is <b>Team A</b> (▲ = good for them).</p>
     <div id="games"></div>
+  </section>
+
+  <section id="portfolio" class="sheet" hidden>
+    <header>
+      <button class="icon close" data-close>✕</button><h2>Portfolio</h2>
+      <span class="spacer"></span>
+      <button id="portfolio-refresh" class="icon text">REFRESH</button>
+    </header>
+    <div id="pf-summary" class="pf-summary"></div>
+    <div id="pf-list"></div>
+    <p id="pf-updated" class="small dim"></p>
   </section>
 
   <section id="settings" class="sheet" hidden>

@@ -44,9 +44,13 @@ def load_settings() -> Settings:
     env = os.environ.get("KALSHI_ENV", "demo")
     if env not in ENDPOINTS:
         raise ValueError(f"KALSHI_ENV must be one of {sorted(ENDPOINTS)}, got {env!r}")
-    try:
-        key_id = os.environ["KALSHI_API_KEY_ID"]
-        key_path = Path(os.environ["KALSHI_PRIVATE_KEY_PATH"])
-    except KeyError as e:
-        raise RuntimeError(f"missing {e.args[0]}; copy .env.example to .env") from None
-    return Settings(env=env, key_id=key_id, key_path=key_path, endpoints=ENDPOINTS[env])
+    # Per-environment keys (KALSHI_PROD_API_KEY_ID, ...) so switching only changes
+    # KALSHI_ENV. The unprefixed names still work as a fallback.
+    prefix = f"KALSHI_{env.upper()}_"
+    key_id = os.environ.get(prefix + "API_KEY_ID") or os.environ.get("KALSHI_API_KEY_ID")
+    key_path = os.environ.get(prefix + "PRIVATE_KEY_PATH") or os.environ.get(
+        "KALSHI_PRIVATE_KEY_PATH"
+    )
+    if not key_id or not key_path:
+        raise RuntimeError(f"missing {prefix}API_KEY_ID / {prefix}PRIVATE_KEY_PATH in .env")
+    return Settings(env=env, key_id=key_id, key_path=Path(key_path), endpoints=ENDPOINTS[env])

@@ -68,6 +68,29 @@ header { display: flex; align-items: center; gap: 8px; min-height: 40px; }
 .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
 #deadline-bar { height: 100%; width: 0; background: var(--warn); transition: width .1s linear; }
 
+.account {
+  background: var(--card); border-radius: 12px; padding: 8px 12px; text-align: left;
+  display: flex; flex-direction: column; gap: 3px; border: 1px solid var(--line);
+}
+.account .row { display: flex; justify-content: space-between; gap: 8px; }
+.account b { font-family: ui-monospace, Menlo, monospace; }
+.account .here { font-size: 17px; font-weight: 800; }
+.pos { color: var(--up); }
+.neg { color: var(--down); }
+.stale-data { opacity: .55; }
+
+.pf-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pf-summary div { background: var(--card); border-radius: 10px; padding: 10px; }
+.pf-summary span { display: block; color: var(--dim); font-size: 13px; }
+.pf-summary b { font: 800 22px ui-monospace, Menlo, monospace; }
+.holding { background: var(--card); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }
+.holding.current { outline: 2px solid var(--paper); }
+.holding .top { display: flex; justify-content: space-between; font-size: 17px; font-weight: 800; }
+.holding .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; font-size: 14px; }
+.holding .grid span { color: var(--dim); display: block; font-size: 12px; }
+.holding .grid b { font-family: ui-monospace, Menlo, monospace; }
+#pf-list { display: flex; flex-direction: column; gap: 8px; }
+
 .pads { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 .pad {
   flex: 1; border-radius: 18px;

@@ -7,7 +7,7 @@ Latency trading tool for Kalshi sports win markets. See `CLAUDE.md` for the desi
 # The venv lives off ~/Desktop: macOS hides .pth files there (CLAUDE.md §11).
 /opt/homebrew/bin/python3.11 -m venv ~/.venvs/courtside && ln -s ~/.venvs/courtside .venv
 .venv/bin/pip install -e '.[dev]'
-cp .env.example .env        # demo key id + path to the PEM in secrets/
+cp .env.example .env        # per-env key ids + PEM paths in secrets/; KALSHI_ENV picks one
 .venv/bin/pytest -q
 ```
 

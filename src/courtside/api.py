@@ -8,11 +8,13 @@ Protocol (JSON). Phone -> server:
     {"type": "search", "q", "id"}                          -> {"type": "games", ...}
     {"type": "select", "event_ticker", "team_a", "sport", "id"}
     {"type": "params", "params": {...}, "id"}
+    {"type": "portfolio", "id"}                            refresh the account view now
     {"type": "ping", "client_ts"}                          -> {"type": "pong", ...} (clock sync)
 Server -> phone:
     {"type": "ack", "id", "ok", "t_server", "error"?, ...}  for every command
     {"type": "snapshot", ...}   full state on connect and after every change
     {"type": "state" | "quote" | "alert" | "rejected", ...}  pushed as they happen
+    {"type": "portfolio", ...}  Kalshi positions + cash, every 3 s while a phone is connected
 
 `client_ts` is the phone's clock corrected to the server clock (the phone estimates
 the offset from ping/pong), so the server can log phone→server latency.
@@ -49,6 +51,7 @@ from courtside.kalshi.auth import Signer
 from courtside.kalshi.rest import KalshiREST
 from courtside.kalshi.ws import now_ms
 from courtside.params import SPORT_DEADLINE_MS, TradeParams, params_from_dict, params_to_dict
+from courtside.portfolio import fetch_portfolio
 from courtside.trader import Trader, quote_dict
 
 log = logging.getLogger(__name__)
@@ -56,7 +59,9 @@ log = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).parent / "web"
 _GAMES_TTL_S = 60
 _CLIENT_QUEUE_MAX = 200
-_SLOW_COMMANDS = {"search", "select"}
+_SLOW_COMMANDS = {"search", "select", "portfolio"}
+_PORTFOLIO_EVERY_S = 3  # while a phone is connected
+_PORTFOLIO_IDLE_EVERY_S = 30
 
 
 # ---- fan-out to connected phones -------------------------------------------------
@@ -113,13 +118,17 @@ class Session:
         self.state_path = data_dir / "server_state.json"
         self.params = TradeParams()
         self._games: tuple[float, list[Game]] | None = None
+        self.portfolio: dict[str, Any] | None = None
+        self._portfolio_task: asyncio.Task[None] | None = None
         self._select_lock = asyncio.Lock()
         self._load_state()
 
     # ---- lifecycle ----------------------------------------------------------
 
     async def resume(self) -> None:
-        """After a server restart, reopen the last selected game (the engine reconciles)."""
+        """Start background work, and after a restart reopen the last selected game
+        (the engine reconciles)."""
+        self._portfolio_task = asyncio.create_task(self._portfolio_loop())
         saved = self._read_state().get("selection")
         if not saved:
             return
@@ -130,6 +139,8 @@ class Session:
             log.warning("could not resume %s: %s", saved, e)
 
     async def close(self) -> None:
+        if self._portfolio_task is not None:
+            self._portfolio_task.cancel()
         if self.trader is not None:
             await self.trader.stop()
         await self.rest.aclose()
@@ -158,6 +169,8 @@ class Session:
                 await self.select(msg["event_ticker"], msg["team_a"], msg.get("sport"))
             elif kind == "params":
                 self._set_params(msg.get("params") or {})
+            elif kind == "portfolio":
+                await self.refresh_portfolio()
             else:
                 raise ValueError(f"unknown command {kind!r}")
             ack["ok"] = True
@@ -226,6 +239,24 @@ class Session:
                 selection={"event_ticker": event_ticker, "team_a": team_a, "sport": sport}
             )
 
+    async def refresh_portfolio(self) -> None:
+        self.portfolio = (await fetch_portfolio(self.rest, now_ms())).to_dict()
+        self.hub.publish({"type": "portfolio", **self.portfolio})
+
+    async def _portfolio_loop(self) -> None:
+        """Refresh every 3 s while a phone is connected, every 30 s otherwise. Checks
+        once a second, so a phone that just connected gets fresh data within ~1 s."""
+        last = -1e9
+        while True:
+            every = _PORTFOLIO_EVERY_S if self.hub.clients else _PORTFOLIO_IDLE_EVERY_S
+            if time.monotonic() - last >= every:
+                last = time.monotonic()
+                try:
+                    await self.refresh_portfolio()
+                except Exception as e:  # keep polling; the phone shows the last good copy
+                    log.warning("portfolio refresh failed: %s", e)
+            await asyncio.sleep(1)
+
     def snapshot(self) -> dict[str, Any]:
         t = self.trader
         market = None
@@ -246,6 +277,7 @@ class Session:
             "engine": t.engine.snapshot() if t and t.engine else None,
             "quote": quote_dict(t.quote(), healthy=t.view.healthy) if t else None,
             "params": params_to_dict(self.params),
+            "portfolio": self.portfolio,
         }
 
     # ---- internals ------------------------------------------------------------

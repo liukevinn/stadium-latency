@@ -21,6 +21,7 @@ const S = {
   deadlineTotal: null,
   lastQty: 0,
   sport: null,
+  portfolio: null, // Kalshi account view, pushed every ~3 s
 };
 
 // ---------------------------------------------------------------------------
@@ -115,6 +116,7 @@ function onMessage(m) {
       S.engine = m.engine;
       S.quote = m.quote;
       S.sport = m.sport;
+      S.portfolio = m.portfolio;
       onEngine(m.engine, false);
       render();
       break;
@@ -126,6 +128,12 @@ function onMessage(m) {
       S.quote = m;
       renderQuote();
       renderPnl();
+      renderAccount();
+      break;
+    case "portfolio":
+      S.portfolio = m;
+      renderAccount();
+      if (!$("portfolio").hidden) renderPortfolio();
       break;
     case "alert":
       showAlert(m);
@@ -214,10 +222,107 @@ function render() {
     const side = e.outcome === "yes" ? `${team} YES` : `${team} NO`;
     $("position").textContent = `${Number(e.qty)} ${side} @ ${e.avg_entry}`;
   } else {
-    $("position").textContent = "flat";
+    $("position").textContent = e ? "flat" : "paper only: taps log MARKs, no orders";
   }
   renderQuote();
   renderPnl();
+  renderAccount();
+}
+
+// ---------------------------------------------------------------------------
+// account / portfolio (Kalshi's view)
+// ---------------------------------------------------------------------------
+
+// The live quote is fresher than the 3 s portfolio poll, so use it for the current game.
+function liveMark(h) {
+  const mk = S.snap && S.snap.market;
+  const q = S.quote;
+  if (!mk || !q || h.ticker !== mk.team_a || q.yes_bid == null || q.yes_ask == null) {
+    return h.mark_cents == null ? null : Number(h.mark_cents);
+  }
+  return h.outcome === "yes" ? q.yes_bid : 100 - q.yes_ask;
+}
+
+function holdingPnl(h) {
+  const mark = liveMark(h);
+  return mark == null ? null : (mark * Number(h.qty)) / 100 - Number(h.cost);
+}
+
+function describe(h) {
+  const qty = Number(h.qty);
+  return h.outcome === "yes" ? `LONG ${qty} ${h.team} YES (wins)` : `LONG ${qty} ${h.team} NO (loses)`;
+}
+
+function pnlSpan(x) {
+  if (x == null) return '<span class="dim">no bid</span>';
+  return `<span class="${x >= 0 ? "pos" : "neg"}">${fmtUsd(x)}</span>`;
+}
+
+function renderAccount() {
+  const pf = S.portfolio;
+  const card = $("account");
+  if (!pf) {
+    $("cash").textContent = "–";
+    $("open-pnl").textContent = "–";
+    return;
+  }
+  card.classList.toggle("stale-data", Date.now() - (pf.t_ms - S.clockOffset) > 15000);
+  $("cash").textContent = `$${Number(pf.cash).toFixed(2)}`;
+  const total = pf.holdings.reduce((acc, h) => acc + (holdingPnl(h) || 0), 0);
+  $("open-pnl").innerHTML = pf.holdings.length ? pnlSpan(total) : "–";
+
+  const mk = S.snap && S.snap.market;
+  const here = pf.holdings.filter((h) => mk && h.event_ticker === mk.event_ticker);
+  const others = pf.holdings.filter((h) => !here.includes(h));
+  $("here").innerHTML = here.length
+    ? here.map((h) => `${esc(describe(h))} @ ${Number(h.avg_cents)} · ${pnlSpan(holdingPnl(h))}`).join("<br>")
+    : mk ? "no position in this game" : "";
+  const otherPnl = others.reduce((acc, h) => acc + (holdingPnl(h) || 0), 0);
+  $("others").innerHTML = others.length
+    ? `+ ${others.length} other position${others.length > 1 ? "s" : ""} · ${pnlSpan(otherPnl)} · tap for all`
+    : "tap for portfolio";
+}
+
+function renderPortfolio() {
+  const pf = S.portfolio;
+  if (!pf) return;
+  const total = pf.holdings.reduce((acc, h) => acc + (holdingPnl(h) || 0), 0);
+  const value = pf.holdings.reduce((acc, h) => {
+    const m = liveMark(h);
+    return acc + (m == null ? 0 : (m * Number(h.qty)) / 100);
+  }, 0);
+  $("pf-summary").innerHTML = `
+    <div><span>Cash</span><b>$${Number(pf.cash).toFixed(2)}</b></div>
+    <div><span>Positions value</span><b>$${value.toFixed(2)}</b></div>
+    <div><span>Open P&amp;L</span><b>${pnlSpan(total)}</b></div>
+    <div><span>Account</span><b>$${(Number(pf.cash) + value).toFixed(2)}</b></div>`;
+  const mk = S.snap && S.snap.market;
+  const list = $("pf-list");
+  list.textContent = "";
+  if (!pf.holdings.length) list.textContent = "No open positions.";
+  for (const h of pf.holdings) {
+    const el = document.createElement("div");
+    el.className = "holding" + (mk && h.event_ticker === mk.event_ticker ? " current" : "");
+    const mark = liveMark(h);
+    el.innerHTML = `
+      <div class="top"><span>${esc(describe(h))}</span>${pnlSpan(holdingPnl(h))}</div>
+      <div class="small dim">${esc(h.ticker)}</div>
+      <div class="grid">
+        <div><span>avg</span><b>${Number(h.avg_cents)}¢</b></div>
+        <div><span>bid now</span><b>${mark == null ? "–" : mark + "¢"}</b></div>
+        <div><span>cost</span><b>$${Number(h.cost).toFixed(2)}</b></div>
+        <div><span>realized</span><b>${fmtUsd(Number(h.realized))}</b></div>
+        <div><span>fees</span><b>$${Number(h.fees).toFixed(2)}</b></div>
+        <div><span>value</span><b>${h.value == null ? "–" : "$" + Number(h.value).toFixed(2)}</b></div>
+      </div>`;
+    list.append(el);
+  }
+  const age = Math.round((Date.now() - (pf.t_ms - S.clockOffset)) / 1000);
+  $("pf-updated").textContent = `Kalshi account, updated ${Math.max(0, age)}s ago. Open P&L is before exit fees.`;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
 function renderQuote() {
@@ -344,7 +449,7 @@ async function toggleMode() {
 // ---------------------------------------------------------------------------
 
 function showScreen(name) {
-  for (const id of ["auth", "main", "picker", "settings"]) $(id).hidden = id !== name;
+  for (const id of ["auth", "main", "picker", "settings", "portfolio"]) $(id).hidden = id !== name;
 }
 
 function guessSport(series) {
@@ -480,6 +585,12 @@ function init() {
     doSearch();
   };
   $("open-settings").onclick = openSettings;
+  $("account").onclick = () => {
+    showScreen("portfolio");
+    renderPortfolio();
+    send("portfolio");
+  };
+  $("portfolio-refresh").onclick = () => send("portfolio");
   $("settings-save").onclick = saveSettings;
   $("search").addEventListener("input", () => {
     clearTimeout(searchTimer);

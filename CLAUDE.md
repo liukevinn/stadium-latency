@@ -298,9 +298,10 @@ Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `script
   - 1 contract at 37¢: model $0.016317 → charged $0.0164.
   - 3 contracts at 37¢: model $0.048951 → $0.0490; `average_fee_paid` $0.0163 is **per contract**.
   - The 6 probe fills sum to $0.1626, which equals `fees_paid_dollars` exactly.
-- [probe] Sports series fee settings: 4,238 of 4,243 are `quadratic ×1` (**no maker fees** → the passive exit costs nothing in fees). 5 are `quadratic ×0.5`. All `KX*GAME` series checked are `quadratic ×1`.
-- These are demo values. Before going live, re-run `probe.py --readonly` against prod, and check fee fields on the first live fills.
-- [unverified] Maker fee multiplier (0.25×) is not exercised, since game series have no maker fees.
+- **[probe, PROD 2026-11-23] Prod differs from demo.** The main game-winner series charge **maker fees**: `KXNFLGAME`, `KXNCAAFGAME`, `KXNBAGAME`, `KXNCAAMBGAME`, `KXNHLGAME` and `KXWNBAGAME` are `quadratic_with_maker_fees ×1`, and `KXMLBGAME` is `×0.5`. **So the passive exit pays a maker fee on prod.** Across all 4,325 sports series: 4,200 are `quadratic ×1`, 106 are `quadratic_with_maker_fees ×1`, 18 are `quadratic ×0.5`, and 1 is `quadratic_with_maker_fees ×0.5`.
+  - The engine reads `fee_type`/`fee_multiplier` per series (with event overrides) at session start, so P&L estimates follow this automatically.
+  - [unverified] The maker share (assumed 0.25× taker) is now on the trading path. Confirm it against the `fee_cost` of the first live passive fills in Milestone 5.
+- (Demo: game series were all `quadratic ×1`, i.e. no maker fees. Don't use demo fee settings for P&L expectations.)
 - Fee drag at 50¢ is about 1.75¢ per contract per side, **about 3.5¢ per round trip** when both legs are taker. So `min_move_cents` should be ≥ 4–5 to cover fees, or the exit should be passive.
 
 ### Sports order delay (2026-11-23) — **[unverified], highest-priority open question**
@@ -310,6 +311,11 @@ Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `script
 - **How to settle it:**
   1. Check Kalshi's site, rulebook and market rules for a live-event delay notice.
   2. On prod, at a live game, send a 1-contract IOC and compare ack `ts_ms` minus send time, and the time to our own `orderbook_delta`, against a non-sports market. A systematic extra delay of hundreds of ms or more = stop.
+
+### Prod account and key (2026-11-23)
+- **Prod REST round trip from the dev Mac: median 48 ms** (min 41), vs 88 ms on demo. The WS snapshot arrived 49 ms after subscribing. Tier: `basic`.
+- **The key in `.env` (`KALSHI_PROD_API_KEY_ID`, named "court") has scopes `["read","write"]`; it is NOT read-only.** The code doesn't trade on prod unless `COURTSIDE_ALLOW_LIVE=1`, and `probe.py` refuses to trade on prod. Kevin should replace it with a `read`-scope key. `GET /api_keys` lists keys and their scopes.
+- Keys are per environment in `.env` (`KALSHI_DEMO_*`, `KALSHI_PROD_*`). Switching only changes `KALSHI_ENV`.
 
 ### Dev environment note
 - The project lives on `~/Desktop`, and macOS keeps setting the `hidden` flag on files inside the project venv. Python 3.11 skips hidden `.pth` files, which breaks the editable install. Fix: the venv lives at `~/.venvs/courtside`, and `.venv` is a symlink to it.
@@ -334,6 +340,7 @@ Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `script
   - `sim`: `FakeExchange` (matches orders against a real `OrderBook`, injects failures), `FakeMarket`, `FakeScheduler`. Used by `tests/test_engine.py`.
   - `trader`: real-time wiring for one market: `MarketFeed` + `UserFeed` (fills), always-on recording, the `Engine` loop, and `tap()`/`flatten()` for the phone API.
   - `store`: the `EventLog` JSONL (`data/logs/<env>/<day>.jsonl`). `params`: `TradeParams`.
+  - `portfolio`: Kalshi's view of the account (all open positions, avg cost, live mark, unrealized/realized, fees, cash). `Session` polls it every 3 s while a phone is connected and pushes it to the phone's account card and portfolio screen.
   - `api`: Starlette app plus `Session`. The session holds the selected game, paper/live mode and persisted params (`data/server_state.json`), and resumes after a restart. Endpoints: `/ws` (auth = first message), `POST /api/command` (Bearer fallback), `GET /api/state`, and static `web/`.
   - `web/`: the PWA (plain HTML/CSS/JS, service worker, manifest). The server owns all state; the phone only sends commands and renders snapshots.
   - Still to come: `analysis/`.
