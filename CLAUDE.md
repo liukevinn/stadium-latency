@@ -216,12 +216,21 @@ Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `script
   - `market_inactive`
   - `invalid_price` (off the market's price grid)
   - `insufficient_balance`
-- [probe] Still to confirm: fill/remaining counts on an IOC that misses, the duplicate-coid behavior, whether `ask` from flat opens NO, reduce_only capping, and ack latency.
+- **[probe, demo 2026-11-23, `KXNBAGAME-26NOV23OKCIND-IND`]**
+  - IOC that misses → 201 with `fill_count "0.00"`, `remaining_count "0.00"`. **"No fill" = `fill_count == 0`.**
+  - IOC that crosses fills at the **resting price**, not our limit. A reduce-only sell IOC with a 1¢ limit filled at the 36¢ bid. So a forced exit can use an aggressive limit safely.
+  - Reusing a `client_order_id`, even after the first order was IOC-cancelled → 409 `order_already_exists`. Retrying with the same coid is safe.
+  - FOK larger than the book → 409 `fill_or_kill_insufficient_resting_volume`. `reduce_only` + GTC → 400 `invalid_order`.
+  - `ask` from flat **opens NO** (position_fp −1). `reduce_only` bid for 3 against −1 filled 1 → flat. `reduce_only` when flat fills 0, with no error.
+  - **`GET /portfolio/orders/{id}` returns 404 for a cancelled order with no fills** (both IOC misses and cancelled GTC orders). Don't use it as a status check; use the ack and the `user_orders`/`fill` WS.
+  - **REST positions can lag fills.** One read right after a fill still showed the old position. The engine tracks position from acks and fills, and reconciles with REST only when IDLE or at startup.
+  - Latency from a home Mac to demo: REST round trip median 88 ms (min 75). Order round trip 80–90 ms warm, 150–340 ms on a cold connection, so keep the connection warm. Cancel takes about 80 ms. Ack `ts_ms` minus send time ≈ the round trip, so clock skew is negligible.
+  - Order groups work on demo (`POST /portfolio/order_groups/create` → `order_group_id`).
 
 ### Positions and netting (2026-11-23) [docs] — [get-positions](https://docs.kalshi.com/api-reference/portfolio/get-positions), [help: buying yes vs selling no](https://help.kalshi.com/en/articles/13823806-buying-yes-vs-selling-no)
 - `market_positions[].position_fp` is **signed**: + = long YES, − = long NO. Kalshi: "our backend treats [buying YES and selling NO] as essentially the same thing", so a position is one signed number per market. Exiting a ▼ (NO) trade = `bid` on YES.
 - Other fields: `market_exposure_dollars` (cost basis, no fees), `realized_pnl_dollars`, `fees_paid_dollars`, `netting_enabled`.
-- Subaccount "collateral return"/netting setting is **locked per event when the first order is placed**. Leave the default; [probe] confirm it doesn't block selling.
+- Subaccount "collateral return"/netting setting is **locked per event when the first order is placed**. With the default, buying and selling both sides on demo worked with no issues [probe].
 
 ### Market data (2026-11-23) [docs] — [orderbook-updates](https://docs.kalshi.com/websockets/orderbook-updates), [get-market-orderbook](https://docs.kalshi.com/api-reference/market/get-market-orderbook)
 - The book is **bids only**: `yes_dollars_fp` and `no_dollars_fp` as `[price, size]` strings, sorted ascending (best bid last). YES ask = 1 − best NO bid.
@@ -229,12 +238,15 @@ Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `script
 - `seq` is per subscription and must be contiguous. On a gap, send `update_subscription` with action `get_snapshot`. A repeated subscribe alone does **not** resync.
 - `use_yes_price: true` puts NO-side levels in YES pricing. The default is false and is planned to flip; set it explicitly.
 - Server sends a ping after 10 s with no data. The server drops slow readers after 15 s of backlog (close 1008).
-- Market fields: `yes_bid_dollars`, `yes_ask_dollars`, sizes, `yes_sub_title` (team), `status`, `price_ranges` (`{start, end, step}`). `units.parse_price` raises on sub-cent prices; [probe] confirm sports game markets use a 1¢ grid.
+- Market fields: `yes_bid_dollars`, `yes_ask_dollars`, sizes, `yes_sub_title` (team), `status`, `price_ranges` (`{start, end, step}`). `units.parse_price` raises on sub-cent prices. [probe] NFL/NCAAF/NBA/NHL/NCAAMB game markets on demo are `price_level_structure: linear_cent`, step 0.01.
+- **Book sizes are fractional** (e.g. `"1853.84"`). Store sizes as Decimal.
+- Demo has live-looking game-winner books (e.g. NBA 36/37¢ with about 450 contracts each side). The `orderbook_snapshot` WS message arrived about 100 ms after subscribing.
+- Game-winner series tickers follow `KX<LEAGUE>GAME`: `KXNFLGAME`, `KXNCAAFGAME`, `KXNBAGAME`, `KXNHLGAME`, `KXNCAAMBGAME`, … Each event (game) has 2 markets, one per team; `yes_sub_title` is the team name.
 - **No text search.** Discovery goes through `GET /series?category=Sports`, `GET /search/filters_by_sport`, `GET /events?series_ticker=…&with_nested_markets=true`.
 
 ### Rate limits (2026-11-23) [docs] — [rate_limits](https://docs.kalshi.com/getting_started/rate_limits)
 - Token buckets, separate for read and write. Default cost is 10 tokens per request; per-endpoint costs are at `GET /account/endpoint_costs`.
-- Basic tier: 200 read / 100 write tokens per second, i.e. about **10 order creates per second**. Cancel costs 2.
+- Basic tier: 200 read / 100 write tokens per second, i.e. about **10 order creates per second**. Cancel costs 2. [probe] Our demo account is `basic` (read capacity 600 / refill 200; write 100/100). The balance endpoint has its own 10-token bucket (1 call per second).
 - Advanced tier (300/300) needs one call to `POST /account/api_usage_level/upgrade` after ≥1 API order.
 - A 429 has no Retry-After header; back off. `X-RateLimit-*` headers are on every response.
 - Not a constraint at our volume, but a FLATTEN retry loop must not spin.
@@ -244,13 +256,19 @@ Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `script
 - **Order groups** offer a related protection. A group has a contract limit over a rolling 15 s window; when it trips, all of the group's resting orders are cancelled and new orders are rejected until it's reset. This is a cheap exchange-side guard against a runaway loop: put every order in a group with limit ≈ 2×`max_position`.
 - `cancel_order_on_pause` cancels resting orders when trading pauses.
 
-### Fees (2026-11-23) — PARTLY [unverified]
+### Fees (2026-11-23)
 - [docs] Per series: `fee_type` ∈ `quadratic` | `quadratic_with_maker_fees` | `quadratic_with_combo_maker_fees` | `flat`, plus `fee_multiplier`. Events can override both. ([get-series](https://docs.kalshi.com/api-reference/market/get-series))
 - [docs] Combo maker fees use a 0.5 maker multiplier instead of 0.25.
 - [docs] Fees are computed per fill and rounded **up to $0.000001**, not to the cent per order. ([fee_rounding](https://docs.kalshi.com/getting_started/fee_rounding))
 - [docs] Cancels are free. Settlement fee is 0 for yes/no markets.
-- [unverified] Taker = `0.07 × mult × C × P(1−P)`; maker = 0.25× (0.5× for combo). The fee schedule PDF returned 429 to our fetcher. `fees.py` uses these values; the probe compares them with the real `average_fee_paid`.
-- [probe] Need to confirm: the fee_type/multiplier on sports game-winner series, and whether the passive exit pays maker fees.
+- **[probe, demo] Taker = `0.07 × C × P(1−P)` confirmed.** The amount charged = the model fee **ceiled to $0.0001** per fill (the account balance precision; docs say non-direct members are aligned to $0.01).
+  - 1 contract at 37¢: model $0.016317 → charged $0.0164.
+  - 3 contracts at 37¢: model $0.048951 → $0.0490; `average_fee_paid` $0.0163 is **per contract**.
+  - The 6 probe fills sum to $0.1626, which equals `fees_paid_dollars` exactly.
+- [probe] Sports series fee settings: 4,238 of 4,243 are `quadratic ×1` (**no maker fees** → the passive exit costs nothing in fees). 5 are `quadratic ×0.5`. All `KX*GAME` series checked are `quadratic ×1`.
+- These are demo values. Before going live, re-run `probe.py --readonly` against prod, and check fee fields on the first live fills.
+- [unverified] Maker fee multiplier (0.25×) is not exercised, since game series have no maker fees.
+- Fee drag at 50¢ is about 1.75¢ per contract per side, **about 3.5¢ per round trip** when both legs are taker. So `min_move_cents` should be ≥ 4–5 to cover fees, or the exit should be passive.
 
 ### Sports order delay (2026-11-23) — **[unverified], highest-priority open question**
 - Dec 2025 press: Kalshi filed with the CFTC to allow order-execution delays during live events, with no stated scope. A Kalshi spokesperson said it "is only a filing." Crypto.com has applied about a 3 s delay to non-market-maker sports orders. ([gambling911](https://gambling911.com/prediction-markets/kalshi-delay-implementation-on-order-executions-120925), [yogonet](https://www.yogonet.com/international/news/2025/12/11/116729-cryptocom-implements-a-threesecond-delay-for-retail-users-in-its-sports-eventbetting-market))
@@ -259,6 +277,9 @@ Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `script
 - **How to settle it:**
   1. Check Kalshi's site, rulebook and market rules for a live-event delay notice.
   2. On prod, at a live game, send a 1-contract IOC and compare ack `ts_ms` minus send time, and the time to our own `orderbook_delta`, against a non-sports market. A systematic extra delay of hundreds of ms or more = stop.
+
+### Dev environment note
+- The project lives on `~/Desktop`, and macOS keeps setting the `hidden` flag on files inside the project venv. Python 3.11 skips hidden `.pth` files, which breaks the editable install. Fix: the venv lives at `~/.venvs/courtside`, and `.venv` is a symlink to it.
 
 ### Old engine (github.com/liukevinn/k), reuse notes
 - Reused: the RSA-PSS signing logic, now `kalshi/auth.py` with Ed25519 added.
