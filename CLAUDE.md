@@ -54,13 +54,13 @@ It must work for **any sport** (football, basketball, baseball, and so on). Abov
 - **The Kalshi API key/private key lives ONLY on the server**, never on the phone. The phone authenticates to the server with a long random token (or a better scheme) over HTTPS/WSS.
 - **The server must handle the entire exit without the phone.** Phone signal will drop; trades must still finish cleanly.
 
-### Kalshi integration (verify every item against the docs)
-- Production REST base: `https://api.elections.kalshi.com/trade-api/v2` (serves all markets, despite the name). Docs also list `https://external-api.kalshi.com/trade-api/v2`. WebSocket: `wss://api.elections.kalshi.com/trade-api/ws/v2`.
-- **Demo environment** exists (`demo-api.kalshi.co`). **All development and testing happens there first.**
-- Authentication: RSA-signed headers `KALSHI-ACCESS-KEY`, `KALSHI-ACCESS-SIGNATURE`, `KALSHI-ACCESS-TIMESTAMP` (timestamp + method + path). Sign at send time.
-- Orders: `POST /portfolio/orders` with ticker, side (yes/no), action (buy/sell), count, type=limit, price, `client_order_id`. **Check exactly how immediate-or-cancel / fill-or-kill / expiration are specified now.** The API has changed field names and price formats (cents integers vs. dollar strings like `"0.5600"`), so confirm the current schema.
-- Things to confirm and record in §11: rate limits, whether cancel-on-disconnect exists, the current fee formula (taker fee is believed to be roughly `ceil(0.07 × contracts × P × (1−P))`, highest near 50¢; **put fees in a single function**), maker fees, position netting rules when selling YES vs. buying NO, and any order-delay rule for sports.
-- Market discovery: find a game's win market by searching events/markets. The UI needs a search box ("Duke", "Clemson") that resolves to a market ticker and shows which team is "Team A" (the YES side).
+### Kalshi integration (details and sources in §11)
+- Hosts are in `src/courtside/config.py`. **All development and testing happens on demo first.**
+- Auth: signed headers, built by `kalshi/auth.py`. Sign at send time.
+- Orders: **V2 only**, `POST /portfolio/events/orders`. Direction is quoted on the YES leg (`side: bid|ask`). **"Buy NO at p" = `ask` at YES price `1−p`.** `kalshi/sides.py` is the only code that does this mapping.
+- Prices and counts on the wire are strings (`"0.5600"`, `"10.00"`). `kalshi/units.py` is the only code that converts them.
+- Fees: `fees.py` is the only fee function. Its coefficients are unverified; Kalshi's per-fill `fee_cost`/`average_fee_paid` is the source of truth.
+- Market discovery: **there is no text search endpoint.** The UI's "Duke"/"Clemson" search has to filter a cached list from `GET /events?series_ticker=<game series>&status=open&with_nested_markets=true` on our side. The team for each market is in `yes_sub_title`.
 
 ---
 
@@ -181,8 +181,88 @@ Non-goals for v1: multiple simultaneous markets, scaling into positions, markets
 ## 11. Verified facts log
 
 Fill this in during Milestone 0 and keep it current. Include the date checked and the doc link.
+Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `scripts/probe.py` (results go in `data/probe/`); **[unverified]** = we couldn't get a source.
 
-- _(empty)_
+### Environments (checked 2026-11-23) [docs] — [api_environments](https://docs.kalshi.com/getting_started/api_environments)
+- REST prod `https://external-api.kalshi.com/trade-api/v2` (recommended; `api.elections.kalshi.com` still works). Demo `https://external-api.demo.kalshi.co/trade-api/v2` (`demo-api.kalshi.co` still works).
+- WS prod `wss://external-api-ws.kalshi.com/trade-api/ws/v2`; demo `wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2`.
+- **Separate lower-latency WS host for `fill` and `user_orders` only**: `wss://user-ws.kalshi.com/...` (demo `user-ws.demo.kalshi.co`). Other channels on it return error 8.
+- Demo and prod API keys are separate.
+
+### Auth (2026-11-23) [docs] — [api_keys](https://docs.kalshi.com/getting_started/api_keys)
+- Message = `timestamp_ms + METHOD + path`. The path starts at `/trade-api/...` and has **no query string**. WS handshake signs `GET /trade-api/ws/v2`.
+- RSA-PSS/SHA-256/MGF1-SHA-256/salt = digest length, **or Ed25519 (recommended)**. Both are supported in `auth.py`.
+- Timestamp must be within **30 s** of Kalshi's clock, or you get 401 `header_timestamp_expired`. Keep NTP on.
+
+### Orders (2026-11-23) [docs] — [create-order-v2](https://docs.kalshi.com/api-reference/orders/create-order-v2), [order_direction](https://docs.kalshi.com/getting_started/order_direction), [order_errors](https://docs.kalshi.com/getting_started/order_errors)
+- **The legacy `POST/DELETE /portfolio/orders` writes return 410 `deprecated_v1_order_endpoint`.** Use the V2 endpoints:
+  - create `POST /portfolio/events/orders`
+  - cancel `DELETE /portfolio/events/orders/{id}?market_ticker=`
+  - cancel all `DELETE /portfolio/events/orders` (204)
+  - batch `.../batched`
+  - amend `.../{id}/amend`
+  - decrease `.../{id}/decrease`
+  - Reads are unchanged: `GET /portfolio/orders[/{id}]`.
+- Create body:
+  - Required: `ticker`, `side` (`bid`|`ask`, YES leg), `price` (dollar string, e.g. `"0.5600"`), `count` (fixed-point string), `time_in_force` (`immediate_or_cancel`|`fill_or_kill`|`good_till_canceled`), `self_trade_prevention_type` (`taker_at_cross`|`maker`).
+  - Optional: `client_order_id` (≤64 chars), `expiration_time` (unix **seconds**; not with IOC), `post_only` (GTC only), `reduce_only` (**IOC only**; capped to your position), `cancel_order_on_pause`, `order_group_id`, `subaccount`.
+- Direction: `bid` = buy YES ≡ sell NO; `ask` = sell YES ≡ buy NO.
+- Response (201 means accepted, not filled): `order_id`, `fill_count`, `remaining_count`, `average_fill_price`, `average_fee_paid`, `ts_ms`. **An IOC fill is known from the ack itself; no second round trip is needed.**
+- Errors to handle:
+  - `order_already_exists` (409, duplicate `client_order_id`; this is how retries stay safe)
+  - `fill_or_kill_insufficient_resting_volume` (409)
+  - `trading_is_paused` (409; cancels still work)
+  - `exchange_is_paused` (409; cancels also fail)
+  - `market_inactive`
+  - `invalid_price` (off the market's price grid)
+  - `insufficient_balance`
+- [probe] Still to confirm: fill/remaining counts on an IOC that misses, the duplicate-coid behavior, whether `ask` from flat opens NO, reduce_only capping, and ack latency.
+
+### Positions and netting (2026-11-23) [docs] — [get-positions](https://docs.kalshi.com/api-reference/portfolio/get-positions), [help: buying yes vs selling no](https://help.kalshi.com/en/articles/13823806-buying-yes-vs-selling-no)
+- `market_positions[].position_fp` is **signed**: + = long YES, − = long NO. Kalshi: "our backend treats [buying YES and selling NO] as essentially the same thing", so a position is one signed number per market. Exiting a ▼ (NO) trade = `bid` on YES.
+- Other fields: `market_exposure_dollars` (cost basis, no fees), `realized_pnl_dollars`, `fees_paid_dollars`, `netting_enabled`.
+- Subaccount "collateral return"/netting setting is **locked per event when the first order is placed**. Leave the default; [probe] confirm it doesn't block selling.
+
+### Market data (2026-11-23) [docs] — [orderbook-updates](https://docs.kalshi.com/websockets/orderbook-updates), [get-market-orderbook](https://docs.kalshi.com/api-reference/market/get-market-orderbook)
+- The book is **bids only**: `yes_dollars_fp` and `no_dollars_fp` as `[price, size]` strings, sorted ascending (best bid last). YES ask = 1 − best NO bid.
+- WS `orderbook_snapshot`, then `orderbook_delta` (`price_dollars`, `delta_fp`, `side`, `ts_ms`). A delta caused by our own order includes `client_order_id`.
+- `seq` is per subscription and must be contiguous. On a gap, send `update_subscription` with action `get_snapshot`. A repeated subscribe alone does **not** resync.
+- `use_yes_price: true` puts NO-side levels in YES pricing. The default is false and is planned to flip; set it explicitly.
+- Server sends a ping after 10 s with no data. The server drops slow readers after 15 s of backlog (close 1008).
+- Market fields: `yes_bid_dollars`, `yes_ask_dollars`, sizes, `yes_sub_title` (team), `status`, `price_ranges` (`{start, end, step}`). `units.parse_price` raises on sub-cent prices; [probe] confirm sports game markets use a 1¢ grid.
+- **No text search.** Discovery goes through `GET /series?category=Sports`, `GET /search/filters_by_sport`, `GET /events?series_ticker=…&with_nested_markets=true`.
+
+### Rate limits (2026-11-23) [docs] — [rate_limits](https://docs.kalshi.com/getting_started/rate_limits)
+- Token buckets, separate for read and write. Default cost is 10 tokens per request; per-endpoint costs are at `GET /account/endpoint_costs`.
+- Basic tier: 200 read / 100 write tokens per second, i.e. about **10 order creates per second**. Cancel costs 2.
+- Advanced tier (300/300) needs one call to `POST /account/api_usage_level/upgrade` after ≥1 API order.
+- A 429 has no Retry-After header; back off. `X-RateLimit-*` headers are on every response.
+- Not a constraint at our volume, but a FLATTEN retry loop must not spin.
+
+### Cancel-on-disconnect (2026-11-23) [docs] — [order_groups](https://docs.kalshi.com/getting_started/order_groups)
+- **No cancel-on-disconnect exists.** The server must handle disconnects itself (CLAUDE.md §6 already requires this).
+- **Order groups** offer a related protection. A group has a contract limit over a rolling 15 s window; when it trips, all of the group's resting orders are cancelled and new orders are rejected until it's reset. This is a cheap exchange-side guard against a runaway loop: put every order in a group with limit ≈ 2×`max_position`.
+- `cancel_order_on_pause` cancels resting orders when trading pauses.
+
+### Fees (2026-11-23) — PARTLY [unverified]
+- [docs] Per series: `fee_type` ∈ `quadratic` | `quadratic_with_maker_fees` | `quadratic_with_combo_maker_fees` | `flat`, plus `fee_multiplier`. Events can override both. ([get-series](https://docs.kalshi.com/api-reference/market/get-series))
+- [docs] Combo maker fees use a 0.5 maker multiplier instead of 0.25.
+- [docs] Fees are computed per fill and rounded **up to $0.000001**, not to the cent per order. ([fee_rounding](https://docs.kalshi.com/getting_started/fee_rounding))
+- [docs] Cancels are free. Settlement fee is 0 for yes/no markets.
+- [unverified] Taker = `0.07 × mult × C × P(1−P)`; maker = 0.25× (0.5× for combo). The fee schedule PDF returned 429 to our fetcher. `fees.py` uses these values; the probe compares them with the real `average_fee_paid`.
+- [probe] Need to confirm: the fee_type/multiplier on sports game-winner series, and whether the passive exit pays maker fees.
+
+### Sports order delay (2026-11-23) — **[unverified], highest-priority open question**
+- Dec 2025 press: Kalshi filed with the CFTC to allow order-execution delays during live events, with no stated scope. A Kalshi spokesperson said it "is only a filing." Crypto.com has applied about a 3 s delay to non-market-maker sports orders. ([gambling911](https://gambling911.com/prediction-markets/kalshi-delay-implementation-on-order-executions-120925), [yogonet](https://www.yogonet.com/international/news/2025/12/11/116729-cryptocom-implements-a-threesecond-delay-for-retail-users-in-its-sports-eventbetting-market))
+- Rule 13.1 amendment (CFTC filing of Nov 26 2025, effective Dec 11 2025): any delay on orders during live events **must be announced on the website/platform**. ([filing](https://www.cftc.gov/filings/orgrules/rules11262533628.pdf); full text not extracted)
+- No source found confirming that a delay is live in 2026. No announcements endpoint exists in the API.
+- **How to settle it:**
+  1. Check Kalshi's site, rulebook and market rules for a live-event delay notice.
+  2. On prod, at a live game, send a 1-contract IOC and compare ack `ts_ms` minus send time, and the time to our own `orderbook_delta`, against a non-sports market. A systematic extra delay of hundreds of ms or more = stop.
+
+### Old engine (github.com/liukevinn/k), reuse notes
+- Reused: the RSA-PSS signing logic, now `kalshi/auth.py` with Ed25519 added.
+- Not reused: its `Contexts/kalshi_api_reference.md` is stale (Bearer-token login, cents ints, the old `trading-api.kalshi.com` host). Its REST client passed the key *path* where PEM content was expected, and used the removed v1 order endpoints.
 
 ---
 
