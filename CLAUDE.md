@@ -243,6 +243,14 @@ Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `script
 - Demo has live-looking game-winner books (e.g. NBA 36/37¢ with about 450 contracts each side). The `orderbook_snapshot` WS message arrived about 100 ms after subscribing.
 - Game-winner series tickers follow `KX<LEAGUE>GAME`: `KXNFLGAME`, `KXNCAAFGAME`, `KXNBAGAME`, `KXNHLGAME`, `KXNCAAMBGAME`, … Each event (game) has 2 markets, one per team; `yes_sub_title` is the team name.
 - **No text search.** Discovery goes through `GET /series?category=Sports`, `GET /search/filters_by_sport`, `GET /events?series_ticker=…&with_nested_markets=true`.
+- **[probe, demo 2026-11-23, Milestone 1]** WS behavior:
+  - **One `seq` counter per subscription (sid), shared by every market in it.** Gap checks are per sid, not per market.
+  - The `trade` channel gets its own sid. Its messages carry `yes_price_dollars`, `count_fp`, `taker_outcome_side`, `taker_book_side`, `ts_ms`.
+  - `use_yes_price: false` is accepted.
+  - `update_subscription` with `{sids, market_tickers, action: "get_snapshot"}` returns fresh snapshots for every market, with no error.
+  - After a forced disconnect, reconnecting and resubscribing recovers the books within about 1 s.
+  - `sending_ts_ms − msg.ts_ms` ≈ 2 ms (median), i.e. Kalshi's internal delay before sending.
+- **Clock skew matters for latency numbers.** The dev Mac ran 83–86 ms behind NTP, so the raw "local receive − `ts_ms`" was often negative. Corrected, exchange→Mac (demo) is p50 about 100 ms, min about 37 ms. `clock.ntp_offset_ms()` is stored in every recording's metadata (`clock_offset_ms`), and analysis must apply it. The prod server must run chrony/NTP.
 
 ### Rate limits (2026-11-23) [docs] — [rate_limits](https://docs.kalshi.com/getting_started/rate_limits)
 - Token buckets, separate for read and write. Default cost is 10 tokens per request; per-endpoint costs are at `GET /account/endpoint_costs`.
@@ -292,5 +300,10 @@ Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `script
 - Python, typed, `asyncio` throughout; no blocking calls on the hot path. Measure and log hot-path latency.
 - Secrets in environment variables / `.env` (gitignored). Never log keys or signatures.
 - Fee calculation, price conversion (cents ↔ dollar strings), and side/action mapping each live in **one** place, with tests.
-- Prefer small, readable modules: `kalshi_client`, `book`, `engine` (state machine), `api` (phone-facing), `store` (logging), `web/` (PWA), `analysis/`.
+- Prefer small, readable modules. Current layout (`src/courtside/`):
+  - `kalshi/`: wire-level only. `auth` (signing), `rest` (V2 REST client), `ws` (`MarketFeed`: books, seq/resync, reconnect), `units` (price/count conversion), `sides` (outcome/action → bid/ask).
+  - `book`: `OrderBook`, `Top`, and `BookHistory`. `BookHistory.at(t)` gives the pre-play anchor quote and returns an empty quote during feed outages.
+  - `discovery`: game search. `recording`: raw JSONL writer/reader and `replay_tops`. `clock`: NTP offset. `fees`: the single fee function. `config`.
+  - Still to come: `engine` (state machine), `api` (phone-facing), `web/` (PWA), `analysis/`.
+  - Scripts: `scripts/probe.py` (M0), `scripts/record.py` (M1), `scripts/replay.py` (recording summary).
 - Kevin prefers concise, direct communication. Flag assumptions explicitly; when unsure about exchange behavior, verify against docs or demo instead of guessing.
