@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 # deadline_ms per sport. Nothing else about a sport is special-cased.
 SPORT_DEADLINE_MS: dict[str, int] = {
@@ -45,3 +46,28 @@ class TradeParams:
             raise ValueError("size must be 1..max_position")
         if self.lookback_ms < 0 or self.deadline_ms <= 0 or self.wait_ms > self.deadline_ms:
             raise ValueError("need lookback_ms >= 0 and 0 < wait_ms <= deadline_ms")
+
+
+def params_to_dict(p: TradeParams) -> dict[str, Any]:
+    d = dataclasses.asdict(p)
+    d["daily_loss_limit"] = str(p.daily_loss_limit)
+    return d
+
+
+def params_from_dict(d: dict[str, Any]) -> TradeParams:
+    """Build validated params from a (possibly partial) dict; unknown keys are ignored."""
+    kwargs: dict[str, Any] = {}
+    for f in dataclasses.fields(TradeParams):
+        if f.name not in d:
+            continue
+        v = d[f.name]
+        if f.name == "daily_loss_limit":
+            kwargs[f.name] = Decimal(str(v))
+        elif v is None:
+            if f.name == "wait_max_ms":  # the only field where None means something
+                kwargs[f.name] = None
+        else:
+            kwargs[f.name] = int(v)
+    p = TradeParams(**kwargs)
+    p.validate()
+    return p

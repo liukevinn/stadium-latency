@@ -1,10 +1,14 @@
-"""Runs one market for real: feeds, always-on recorder, and the engine loop.
+"""Runs one game for real: feeds, always-on recorder, MARKs, and (optionally) the engine.
 
-    trader = Trader(settings, signer, game, team_a_ticker, params)
-    await trader.start()      # connect, reconcile, start the engine loop
-    trader.tap(Direction.UP)  # from the phone API (Milestone 3)
+    trader = Trader(settings, signer, game, team_a_ticker, params, trading=True)
+    await trader.start()      # connect; if trading, reconcile and start the engine loop
+    trader.mark(Direction.UP) # paper mode: log what the book looked like, no order
+    trader.tap(Direction.UP)  # live mode (trading=True only)
     trader.flatten()
     await trader.stop()
+
+trading=False needs only market data (a read-only key is enough). It records the
+game and accepts MARKs, which is the evidence-gathering mode of CLAUDE.md §8/§9.
 
 Everything the engine does runs on one asyncio loop. tap() and flatten() stamp
 the server receive time and queue the event; the engine handles events in order.
@@ -25,7 +29,18 @@ from courtside.book import Top
 from courtside.clock import ntp_offset_ms
 from courtside.config import Settings
 from courtside.discovery import Game
-from courtside.engine import BookUpdate, Direction, Engine, Event, Fill, Flatten, Listener, Tap
+from courtside.engine import (
+    BookUpdate,
+    Direction,
+    Engine,
+    Event,
+    Fill,
+    Flatten,
+    Listener,
+    MarketView,
+    State,
+    Tap,
+)
 from courtside.exchange import FillEvent, KalshiExchange
 from courtside.kalshi.auth import Signer
 from courtside.kalshi.rest import KalshiREST
@@ -78,6 +93,7 @@ class Trader:
         ticker: str,
         params: TradeParams,
         *,
+        trading: bool = False,
         data_dir: Path = Path("data"),
         listener: Listener | None = None,
     ) -> None:
@@ -88,6 +104,7 @@ class Trader:
         self.game = game
         self.ticker = ticker
         self.params = params
+        self.trading = trading
         self.data_dir = data_dir
         self.listener = listener
         self.queue: asyncio.Queue[Event] = asyncio.Queue()
@@ -95,6 +112,7 @@ class Trader:
         self.recorder: RecordingWriter | None = None
         self.events: EventLog | None = None
         self.engine: Engine | None = None
+        self.user_feed: UserFeed | None = None
         self._tasks: list[asyncio.Task[Any]] = []
 
     # ---- lifecycle -------------------------------------------------------------
@@ -123,7 +141,7 @@ class Trader:
         )
         self.events = EventLog(log_path)
         self.events.write(
-            "session_start", at_ms=now_ms(), ticker=self.ticker, env=env,
+            "session_start", at_ms=now_ms(), ticker=self.ticker, env=env, trading=self.trading,
             params=_params_dict(self.params), fee_type=fee_type, fee_multiplier=fee_mult,
             clock_offset_ms=offset, recording=str(rec_path),
         )  # fmt: skip
@@ -133,21 +151,25 @@ class Trader:
             self.settings.endpoints.ws, self.signer, tickers,
             on_message=self._record, on_top=self._on_top,
         )  # fmt: skip
-        self.user_feed = UserFeed(
-            self.settings.endpoints.user_ws, self.signer, self._on_fill, on_message=self._record
-        )
+        self.view = FeedView(self.market_feed, self.ticker)
         self._tasks += [
             asyncio.create_task(self.market_feed.run()),
-            asyncio.create_task(self.user_feed.run()),
             asyncio.create_task(self._flush_loop()),
         ]
         await asyncio.wait_for(self.market_feed.connected.wait(), feed_timeout_s)
+        if not self.trading:
+            return
+
+        self.user_feed = UserFeed(
+            self.settings.endpoints.user_ws, self.signer, self._on_fill, on_message=self._record
+        )
+        self._tasks.append(asyncio.create_task(self.user_feed.run()))
         await asyncio.wait_for(self.user_feed.connected.wait(), feed_timeout_s)
 
         self.engine = Engine(
             ticker=self.ticker,
             exchange=KalshiExchange(self.rest),
-            market=FeedView(self.market_feed, self.ticker),
+            market=self.view,
             scheduler=AsyncioScheduler(self.queue),
             params=self.params,
             log_=self.events,
@@ -160,8 +182,9 @@ class Trader:
         self._tasks.append(asyncio.create_task(self._engine_loop()))
 
     async def stop(self) -> None:
-        for feed in (self.market_feed, self.user_feed):
-            await feed.stop()
+        await self.market_feed.stop()
+        if self.user_feed is not None:
+            await self.user_feed.stop()
         for t in self._tasks:
             t.cancel()
         for t in self._tasks:
@@ -176,12 +199,50 @@ class Trader:
     # ---- inputs ----------------------------------------------------------------
 
     def tap(
-        self, direction: Direction, client_ts_ms: int | None = None, tap_id: str | None = None
+        self,
+        direction: Direction,
+        client_ts_ms: int | None = None,
+        tap_id: str | None = None,
+        t_ms: int | None = None,
     ) -> None:
-        self.queue.put_nowait(Tap(direction, now_ms(), client_ts_ms, tap_id))
+        if self.engine is None:
+            raise RuntimeError("trading is off for this session (paper mode only)")
+        self.queue.put_nowait(Tap(direction, t_ms or now_ms(), client_ts_ms, tap_id))
 
     def flatten(self) -> None:
+        if self.engine is None:
+            raise RuntimeError("trading is off for this session")
         self.queue.put_nowait(Flatten(now_ms()))
+
+    def mark(
+        self,
+        direction: Direction,
+        client_ts_ms: int | None = None,
+        mark_id: str | None = None,
+        t_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Paper mode: log the tap and the book around it, without trading."""
+        rec = mark_record(
+            direction, t_ms or now_ms(), self.view, self.params.lookback_ms,
+            client_ts_ms=client_ts_ms, mark_id=mark_id, ticker=self.ticker,
+        )  # fmt: skip
+        assert self.events is not None
+        self.events.write("mark", at_ms=now_ms(), **rec)
+        return rec
+
+    def set_params(self, params: TradeParams) -> None:
+        """Change parameters. Only allowed while flat, so a trade never changes rules midway."""
+        params.validate()
+        if self.engine is not None:
+            if self.engine.state is not State.IDLE:
+                raise RuntimeError("can't change settings while a trade is open")
+            self.engine.params = params
+        self.params = params
+        if self.events is not None:
+            self.events.write("params_changed", at_ms=now_ms(), params=_params_dict(params))
+
+    def quote(self) -> Top | None:
+        return self.view.latest()
 
     # ---- internals -------------------------------------------------------------
 
@@ -192,8 +253,12 @@ class Trader:
             await self.engine.handle(ev)
 
     def _on_top(self, ticker: str, top: Top) -> None:
-        if ticker == self.ticker:
+        if ticker != self.ticker:
+            return
+        if self.engine is not None:
             self.queue.put_nowait(BookUpdate(top))
+        if self.listener is not None:
+            self.listener("quote", quote_dict(top, healthy=self.view.healthy))
 
     def _on_fill(self, fill: FillEvent) -> None:
         self.queue.put_nowait(Fill(fill))
@@ -219,3 +284,46 @@ class Trader:
 
 def _params_dict(p: TradeParams) -> dict[str, Any]:
     return {f: str(getattr(p, f)) for f in p.__dataclass_fields__}
+
+
+def quote_dict(top: Top | None, *, healthy: bool) -> dict[str, Any]:
+    if top is None:
+        return {"healthy": healthy, "yes_bid": None, "yes_ask": None, "t_ms": None}
+    return {
+        "healthy": healthy,
+        "yes_bid": top.yes_bid,
+        "yes_ask": top.yes_ask,
+        "yes_bid_size": str(top.yes_bid_size),
+        "yes_ask_size": str(top.yes_ask_size),
+        "t_ms": top.t_ms,
+    }
+
+
+def mark_record(
+    direction: Direction,
+    t_ms: int,
+    view: MarketView,
+    lookback_ms: int,
+    *,
+    client_ts_ms: int | None,
+    mark_id: str | None,
+    ticker: str,
+) -> dict[str, Any]:
+    """What a MARK records: the tap, the live quote, and the pre-play anchor quote.
+    The full book around it is in the game recording (Milestone 4 replays it)."""
+    outcome = direction.outcome
+    top, anchor = view.latest(), view.at(t_ms - lookback_ms)
+    return {
+        "mark_id": mark_id,
+        "direction": direction.value,
+        "ticker": ticker,
+        "t_ms": t_ms,
+        "client_ts_ms": client_ts_ms,
+        "healthy": view.healthy,
+        "yes_bid": top.yes_bid if top else None,
+        "yes_ask": top.yes_ask if top else None,
+        "anchor_yes_bid": anchor.yes_bid if anchor else None,
+        "anchor_yes_ask": anchor.yes_ask if anchor else None,
+        "anchor_ask": anchor.ask(outcome) if anchor else None,  # in the tapped outcome's terms
+        "ask_now": top.ask(outcome) if top else None,
+    }

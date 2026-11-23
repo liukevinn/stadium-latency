@@ -54,6 +54,14 @@ It must work for **any sport** (football, basketball, baseball, and so on). Abov
 - **The Kalshi API key/private key lives ONLY on the server**, never on the phone. The phone authenticates to the server with a long random token (or a better scheme) over HTTPS/WSS.
 - **The server must handle the entire exit without the phone.** Phone signal will drop; trades must still finish cleanly.
 
+### Phone ↔ server (Milestone 3, as built)
+- **Auth**: `COURTSIDE_TOKEN` in `.env` (≥32 chars; `scripts/serve.py --gen-token`), compared in constant time. On the WebSocket it is the first message (`{"type":"auth"}`); a bad token closes with code 4401. The phone stores it in localStorage, set once via `https://host/#token=…` (the fragment never reaches the server or its logs).
+- **Modes**: every newly selected game starts in **PAPER**, where ▲/▼ log a MARK (tap time, live quote, pre-play anchor quote) and place no order. **LIVE** needs a confirm. It's enabled on demo; prod also needs `COURTSIDE_ALLOW_LIVE=1` (the Milestone 5 gate). With a read-only key the server can only record and MARK.
+- **Latency**: the phone syncs its clock to the server with ping/pong (lowest-RTT sample) and sends `client_ts` in server time. Each ack carries `phone_to_server_ms`; the engine logs `order_rtt_ms`. The phone shows both, plus the ack round trip.
+- **Fallback**: if the WebSocket is down, commands go by `fetch(..., {keepalive: true})` to `POST /api/command`.
+- **HTTPS is required in production.** Wake Lock and the service worker only work in a secure context; on plain-HTTP LAN testing everything else works.
+- **iOS has no `navigator.vibrate`.** Haptics use the iOS 18+ `<input type=checkbox switch>` label-click trick; this is untested on a real phone. A haptic on a fill (not triggered by a gesture) may not fire on iOS.
+
 ### Kalshi integration (details and sources in §11)
 - Hosts are in `src/courtside/config.py`. **All development and testing happens on demo first.**
 - Auth: signed headers, built by `kalshi/auth.py`. Sign at send time.
@@ -326,6 +334,8 @@ Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `script
   - `sim`: `FakeExchange` (matches orders against a real `OrderBook`, injects failures), `FakeMarket`, `FakeScheduler`. Used by `tests/test_engine.py`.
   - `trader`: real-time wiring for one market: `MarketFeed` + `UserFeed` (fills), always-on recording, the `Engine` loop, and `tap()`/`flatten()` for the phone API.
   - `store`: the `EventLog` JSONL (`data/logs/<env>/<day>.jsonl`). `params`: `TradeParams`.
-  - Still to come: `api` (phone-facing), `web/` (PWA), `analysis/`.
-  - Scripts: `scripts/probe.py` (M0), `scripts/record.py` (M1), `scripts/replay.py` (recording summary), `scripts/trade.py` (M2 terminal driver, demo only).
+  - `api`: Starlette app plus `Session`. The session holds the selected game, paper/live mode and persisted params (`data/server_state.json`), and resumes after a restart. Endpoints: `/ws` (auth = first message), `POST /api/command` (Bearer fallback), `GET /api/state`, and static `web/`.
+  - `web/`: the PWA (plain HTML/CSS/JS, service worker, manifest). The server owns all state; the phone only sends commands and renders snapshots.
+  - Still to come: `analysis/`.
+  - Scripts: `scripts/probe.py` (M0), `scripts/record.py` (M1), `scripts/replay.py` (recording summary), `scripts/trade.py` (M2 terminal driver, demo only), `scripts/serve.py` (M3 server).
 - Kevin prefers concise, direct communication. Flag assumptions explicitly; when unsure about exchange behavior, verify against docs or demo instead of guessing.

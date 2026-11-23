@@ -33,3 +33,10 @@ Recordings hold every raw WS message with its local receive time, plus the NTP c
 .venv/bin/python scripts/trade.py <game words> --team <team> --size 1 --deadline 4000 --auto
 ```
 The state machine is in `src/courtside/engine.py`, and its tests (every §6 transition and edge case) are in `tests/test_engine.py`.
+
+## Milestone 3 phone app
+```
+.venv/bin/python scripts/serve.py --gen-token     # put the output in .env as COURTSIDE_TOKEN
+.venv/bin/python scripts/serve.py --host 0.0.0.0  # then open http://<laptop-ip>:8000/#token=<token> on the phone
+```
+Use Share → Add to Home Screen to install it. New games start in PAPER (▲/▼ = MARK). LIVE needs a confirm and is enabled on demo only.

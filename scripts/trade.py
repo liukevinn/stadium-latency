@@ -128,7 +128,16 @@ async def main() -> None:
     ticker = pick_team(game, args.team)
     print(f"{game.title}: Team A = {ticker}  params={params}")
 
-    trader = Trader(settings, signer, game, ticker, params, data_dir=Path("data"), listener=printer)
+    trader = Trader(
+        settings,
+        signer,
+        game,
+        ticker,
+        params,
+        trading=True,
+        data_dir=Path("data"),
+        listener=printer,
+    )
     await trader.start()
     print("ready. u/d/f/s/q" if not args.auto else "ready.")
     try:
