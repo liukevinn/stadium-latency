@@ -25,3 +25,11 @@ Reports are written to `data/probe/` (gitignored). Findings are summarized in CL
 .venv/bin/python scripts/replay.py data/recordings/<env>/<file>.jsonl.gz   # summary / --csv
 ```
 Recordings hold every raw WS message with its local receive time, plus the NTP clock offset in the metadata.
+
+## Milestone 2 engine (demo only)
+```
+.venv/bin/python scripts/trade.py <game words> --team <team> --size 1 --deadline 4000
+#   u = ▲  d = ▼  f = FLATTEN  s = status  q = quit
+.venv/bin/python scripts/trade.py <game words> --team <team> --size 1 --deadline 4000 --auto
+```
+The state machine is in `src/courtside/engine.py`, and its tests (every §6 transition and edge case) are in `tests/test_engine.py`.

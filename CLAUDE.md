@@ -114,6 +114,17 @@ IDLE --tap ▲/▼--> ENTERING --filled--> WAITING --repriced or wait timeout-->
 | Game ends while holding | Settles at $0/$1. Log it. |
 | Server restart | On startup, reconcile positions and open orders with Kalshi before accepting any taps. |
 
+### Implementation decisions (Milestone 2; flag any you disagree with)
+- **Taps during ENTERING** are detected by timestamp. Events are handled in order, so a second tap is only seen after the entry finishes; any tap received before the entry ack is ignored. A FLATTEN sent during ENTERING is processed right after the entry, so it exits immediately.
+- **Forced exit price**: an IOC reduce-only sell at `best_bid − forced_slip_cents`, which fills at resting prices. It retries with backoff (200 ms doubling, max 1 s), re-pricing from the current bid each time. Alerts: `no_bid`, `forced_exit_rejected`, and `not_flat` after 3 s.
+- **Passive exit**: a GTC `post_only` sell. Fills come from the user `fill` WebSocket and are de-duplicated by `trade_id` and capped per order. On cancel, `reduced_by` reveals fills whose WS message hasn't arrived yet; these are booked at our limit price, and later WS messages for them are ignored.
+- **Uncertain order outcomes** (timeout or 5xx): for the entry, ask REST for the position and, if filled, adopt it at the worst allowed price. For a forced exit, re-sync quantity from REST before the next attempt. A placement that may be resting without our knowledge triggers `cancel_all` before the next forced attempt.
+- **After every trade**, a REST position check 1.5 s later force-exits any mismatch (`position_mismatch` alert).
+- **Feed down while holding** → forced exit, priced from a REST quote.
+- **Game over** (`market_inactive`) → logged as `held_to_settlement`; not counted in the daily P&L.
+- **Startup**: `cancel_all`, then any leftover position is adopted and force-exited. Adopted positions have no known entry price and are not counted in the daily P&L.
+- **Daily loss**: the net of today's closed trades, read back from the event log at startup.
+
 ---
 
 ## 7. Configuration
@@ -125,13 +136,19 @@ Global and per-sport presets, editable from the phone (settings screen) and pers
 | `size` | Contracts per tap | small (e.g. 10) |
 | `chase_cents` | Max cents above the pre-play ask we'll pay | 5 |
 | `lookback_ms` | How far before the tap to take the pre-play price | 1500 |
-| `min_move_cents` | Bid gain that counts as "market caught up" | 3 |
+| `min_move_cents` | Bid gain that counts as "market caught up" | 4 (was 3; a taker round trip costs about 3.5¢ in fees at 50¢, §11) |
 | `wait_max_ms` | Max time in WAITING | deadline/2 |
 | `deadline_ms` | Must be flat by this long after the fill | football 20000, baseball 10000, basketball 6000 |
 | `stop_cents` | Auto-stop distance (0 = off) | 0 |
 | `max_position` | Hard cap on contracts held | 3× size |
 | `max_price` | Never buy above this | 97¢ |
 | `daily_loss_limit` | Stop accepting taps once hit | e.g. $20 |
+| `requote_ms` | Minimum time between passive-exit requotes | 250 |
+| `forced_slip_cents` | Forced exit = IOC reduce-only sell at best bid minus this (fills at resting prices, §11) | 5 |
+| `forced_retry_ms` | First forced-exit retry delay (doubles, max 1 s) | 200 |
+| `flat_alert_ms` | Alert the phone if not flat this long into a forced exit | 3000 |
+
+All parameters live in `src/courtside/params.py` (`TradeParams`).
 
 Sport presets only change `deadline_ms` (and maybe `wait_max_ms`). **The sport is never otherwise special-cased.**
 
@@ -301,9 +318,14 @@ Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `script
 - Secrets in environment variables / `.env` (gitignored). Never log keys or signatures.
 - Fee calculation, price conversion (cents ↔ dollar strings), and side/action mapping each live in **one** place, with tests.
 - Prefer small, readable modules. Current layout (`src/courtside/`):
-  - `kalshi/`: wire-level only. `auth` (signing), `rest` (V2 REST client), `ws` (`MarketFeed`: books, seq/resync, reconnect), `units` (price/count conversion), `sides` (outcome/action → bid/ask).
+  - `kalshi/`: wire-level only. `auth` (signing), `rest` (V2 REST client), `ws` (`MarketFeed`: books, seq/resync, reconnect; `UserFeed`: our fills), `units` (price/count conversion), `sides` (outcome/action → bid/ask).
   - `book`: `OrderBook`, `Top`, and `BookHistory`. `BookHistory.at(t)` gives the pre-play anchor quote and returns an empty quote during feed outages.
   - `discovery`: game search. `recording`: raw JSONL writer/reader and `replay_tops`. `clock`: NTP offset. `fees`: the single fee function. `config`.
-  - Still to come: `engine` (state machine), `api` (phone-facing), `web/` (PWA), `analysis/`.
-  - Scripts: `scripts/probe.py` (M0), `scripts/record.py` (M1), `scripts/replay.py` (recording summary).
+  - `engine`: the §6 state machine, driven by events (Tap, Flatten, BookUpdate, Fill, Timer) through an injected Scheduler.
+  - `exchange`: the `Exchange` protocol (place/cancel/cancel_all/position/quote) and `KalshiExchange`.
+  - `sim`: `FakeExchange` (matches orders against a real `OrderBook`, injects failures), `FakeMarket`, `FakeScheduler`. Used by `tests/test_engine.py`.
+  - `trader`: real-time wiring for one market: `MarketFeed` + `UserFeed` (fills), always-on recording, the `Engine` loop, and `tap()`/`flatten()` for the phone API.
+  - `store`: the `EventLog` JSONL (`data/logs/<env>/<day>.jsonl`). `params`: `TradeParams`.
+  - Still to come: `api` (phone-facing), `web/` (PWA), `analysis/`.
+  - Scripts: `scripts/probe.py` (M0), `scripts/record.py` (M1), `scripts/replay.py` (recording summary), `scripts/trade.py` (M2 terminal driver, demo only).
 - Kevin prefers concise, direct communication. Flag assumptions explicitly; when unsure about exchange behavior, verify against docs or demo instead of guessing.
