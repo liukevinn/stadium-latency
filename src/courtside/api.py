@@ -52,7 +52,7 @@ from courtside.kalshi.rest import KalshiREST
 from courtside.kalshi.ws import now_ms
 from courtside.params import SPORT_DEADLINE_MS, TradeParams, params_from_dict, params_to_dict
 from courtside.portfolio import fetch_portfolio
-from courtside.trader import Trader, quote_dict
+from courtside.trader import Trader
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class Hub:
 
     def __init__(self) -> None:
         self.clients: set[asyncio.Queue[dict[str, Any]]] = set()
-        self._quote: dict[str, Any] | None = None
+        self._quotes: dict[str, dict[str, Any]] = {}  # latest unsent quote per market
         self._quote_scheduled = False
 
     def publish(self, msg: dict[str, Any]) -> None:
@@ -83,15 +83,16 @@ class Hub:
             q.put_nowait(msg)
 
     def publish_quote(self, quote: dict[str, Any]) -> None:
-        self._quote = quote
+        self._quotes[str(quote.get("ticker"))] = quote
         if not self._quote_scheduled:
             self._quote_scheduled = True
-            asyncio.get_running_loop().call_later(0.1, self._flush_quote)
+            asyncio.get_running_loop().call_later(0.1, self._flush_quotes)
 
-    def _flush_quote(self) -> None:
+    def _flush_quotes(self) -> None:
         self._quote_scheduled = False
-        if self._quote is not None:
-            self.publish({"type": "quote", **self._quote})
+        quotes, self._quotes = self._quotes, {}
+        for q in quotes.values():
+            self.publish({"type": "quote", **q})
 
 
 # ---- server-side session: one selected game, paper or live -------------------------
@@ -263,6 +264,7 @@ class Session:
         if t is not None:
             market = {
                 "event_ticker": t.game.event_ticker,
+                "series": t.game.series_ticker,
                 "title": t.game.title,
                 "team_a": t.ticker,
                 "teams": {m.ticker: m.team for m in t.game.markets},
@@ -275,7 +277,7 @@ class Session:
             "sport": self.sport,
             "market": market,
             "engine": t.engine.snapshot() if t and t.engine else None,
-            "quote": quote_dict(t.quote(), healthy=t.view.healthy) if t else None,
+            "quotes": t.quotes() if t else {},
             "params": params_to_dict(self.params),
             "portfolio": self.portfolio,
         }

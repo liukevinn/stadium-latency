@@ -244,6 +244,14 @@ class Trader:
     def quote(self) -> Top | None:
         return self.view.latest()
 
+    def quotes(self) -> dict[str, dict[str, Any]]:
+        """Latest quote for every market in the game (both teams), for the phone."""
+        out = {}
+        for ticker, hist in self.market_feed.history.items():
+            healthy = self.market_feed.books[ticker].valid
+            out[ticker] = quote_dict(hist.latest(), healthy=healthy, ticker=ticker)
+        return out
+
     # ---- internals -------------------------------------------------------------
 
     async def _engine_loop(self) -> None:
@@ -253,12 +261,11 @@ class Trader:
             await self.engine.handle(ev)
 
     def _on_top(self, ticker: str, top: Top) -> None:
-        if ticker != self.ticker:
-            return
-        if self.engine is not None:
+        if ticker == self.ticker and self.engine is not None:
             self.queue.put_nowait(BookUpdate(top))
         if self.listener is not None:
-            self.listener("quote", quote_dict(top, healthy=self.view.healthy))
+            healthy = self.market_feed.books[ticker].valid
+            self.listener("quote", quote_dict(top, healthy=healthy, ticker=ticker))
 
     def _on_fill(self, fill: FillEvent) -> None:
         self.queue.put_nowait(Fill(fill))
@@ -286,10 +293,17 @@ def _params_dict(p: TradeParams) -> dict[str, Any]:
     return {f: str(getattr(p, f)) for f in p.__dataclass_fields__}
 
 
-def quote_dict(top: Top | None, *, healthy: bool) -> dict[str, Any]:
+def quote_dict(top: Top | None, *, healthy: bool, ticker: str | None = None) -> dict[str, Any]:
     if top is None:
-        return {"healthy": healthy, "yes_bid": None, "yes_ask": None, "t_ms": None}
+        return {
+            "ticker": ticker,
+            "healthy": healthy,
+            "yes_bid": None,
+            "yes_ask": None,
+            "t_ms": None,
+        }
     return {
+        "ticker": ticker,
         "healthy": healthy,
         "yes_bid": top.yes_bid,
         "yes_ask": top.yes_ask,

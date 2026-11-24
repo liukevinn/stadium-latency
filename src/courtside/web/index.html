@@ -3,14 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <meta name="theme-color" content="#000000">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0a0c0f" media="(prefers-color-scheme: dark)">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Courtside">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icon-180.png">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="preload" href="fonts/BarlowCondensed-500.ttf" as="font" type="font/ttf" crossorigin>
   <link rel="stylesheet" href="app.css">
+  <script>
+    // apply the saved theme before first paint (no flash)
+    try { const t = localStorage.getItem("courtside.theme"); if (t && t !== "system") document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
   <title>Courtside</title>
 </head>
 <body>
@@ -19,94 +25,98 @@
   <label for="haptic" id="haptic-label" aria-hidden="true"></label>
 
   <section id="auth" hidden>
-    <h1>Courtside</h1>
-    <p>Paste the server token (COURTSIDE_TOKEN).</p>
-    <input id="token-input" type="password" autocomplete="off" spellcheck="false">
-    <button id="token-save" class="wide">Save</button>
+    <div class="sheet-head"><h2>Courtside</h2></div>
+    <p class="hint">Paste the server token (COURTSIDE_TOKEN from .env).</p>
+    <input id="token-input" class="field" type="password" autocomplete="off" spellcheck="false">
+    <button id="token-save" class="primary">Continue</button>
   </section>
 
   <section id="main" hidden>
-    <header>
-      <span id="conn" class="dot down" title="connection"></span>
-      <span id="env" class="badge"></span>
-      <button id="mode" class="mode paper">PAPER</button>
+    <header class="topbar">
+      <span id="conn" class="dot" title="connection"></span>
+      <span id="env" class="env"></span>
+      <button id="mode" class="mode-pill">Paper</button>
       <span class="spacer"></span>
-      <button id="open-picker" class="icon text" aria-label="choose game">GAME</button>
-      <button id="open-settings" class="icon" aria-label="settings">⚙</button>
+      <button id="open-picker" class="nav-btn">Games</button>
+      <button id="open-portfolio" class="nav-btn">Portfolio</button>
+      <button id="open-settings" class="nav-btn icon" aria-label="settings">⚙︎</button>
     </header>
+    <div id="live-banner" class="live-banner" hidden>LIVE · taps place real orders</div>
+    <div id="toast" class="toast" hidden></div>
 
-    <div id="alert" class="alert" hidden></div>
-
-    <div id="market" class="market">
+    <div class="scroll">
+      <div id="league" class="league"></div>
       <div id="title" class="title">No game selected</div>
-      <div class="quote">
-        <div><span class="label">BID</span><span id="bid" class="num">–</span></div>
-        <div id="team-a" class="team">–</div>
-        <div><span class="label">ASK</span><span id="ask" class="num">–</span></div>
+      <div id="subtitle" class="subtitle">Tap Games to pick a market.</div>
+
+      <div id="markets"></div>
+
+      <div class="card" id="engine-card">
+        <div class="row">
+          <span id="state" class="state-chip">–</span>
+          <span id="countdown" class="countdown"></span>
+        </div>
+        <div class="bar"><div id="deadline-bar"></div></div>
+        <div class="row small"><span id="position" class="muted">flat</span><span id="pnl"></span></div>
+        <div id="latency" class="small faint">No taps yet</div>
       </div>
+
+      <div class="section-title">Your positions</div>
+      <button id="account" class="card">
+        <div class="row">
+          <div class="kv"><span>Cash</span><b id="cash" class="big-num">–</b></div>
+          <div class="kv" style="text-align:right"><span>Open P&amp;L</span><b id="open-pnl" class="big-num">–</b></div>
+        </div>
+        <div id="here" class="holding-line"></div>
+        <div id="others" class="small muted"></div>
+      </button>
     </div>
 
-    <div class="status">
-      <div class="row">
-        <span id="state" class="state">–</span>
-        <span id="countdown" class="countdown"></span>
+    <footer class="actions">
+      <div class="pair">
+        <button id="up" class="act up"><span class="act-main">▲ <span id="up-label">Team A</span></span><span id="up-sub" class="act-sub">good</span></button>
+        <button id="down" class="act down"><span class="act-main">▼ <span id="down-label">Team A</span></span><span id="down-sub" class="act-sub">bad</span></button>
       </div>
-      <div class="bar"><div id="deadline-bar"></div></div>
-      <div class="row small">
-        <span id="position">flat</span>
-        <span id="pnl">P&amp;L –</span>
-      </div>
-      <div id="latency" class="row small dim">last tap –</div>
-    </div>
-
-    <!-- Kalshi's view of the account (not the engine's). Tap for the full portfolio. -->
-    <button id="account" class="account">
-      <div class="row">
-        <span>Cash <b id="cash">–</b></span>
-        <span>Open P&amp;L <b id="open-pnl">–</b></span>
-      </div>
-      <div id="here" class="row here">no position in this game</div>
-      <div id="others" class="small dim"></div>
-    </button>
-
-    <div class="pads">
-      <button id="up" class="pad up"><span class="arrow">▲</span><span id="up-label">TEAM A</span><span class="sub">good</span></button>
-      <button id="down" class="pad down"><span class="arrow">▼</span><span id="down-label">TEAM A</span><span class="sub">bad</span></button>
-    </div>
-
-    <button id="flatten" class="flatten"><span id="flatten-fill"></span><span class="flatten-text">HOLD TO FLATTEN</span></button>
+      <button id="flatten" class="flatten"><span id="flatten-fill"></span><span class="flatten-text">Hold to flatten</span></button>
+    </footer>
   </section>
 
   <section id="picker" class="sheet" hidden>
-    <header><button class="icon close" data-close>✕</button><h2>Choose game</h2></header>
-    <input id="search" type="search" placeholder="Team or league, e.g. duke" autocomplete="off">
+    <div class="sheet-head"><button class="back" data-close aria-label="back">‹</button><h2>Games</h2></div>
+    <input id="search" class="field" type="search" placeholder="Search teams or leagues" autocomplete="off">
     <div class="chips" id="sport-chips">
+      <button data-sport="" class="on">Auto</button>
       <button data-sport="football">Football</button>
       <button data-sport="basketball">Basketball</button>
       <button data-sport="baseball">Baseball</button>
-      <button data-sport="">Other</button>
     </div>
-    <p class="dim small">Tap the team that is <b>Team A</b> (▲ = good for them).</p>
+    <p class="hint">Tap the team that is <b>Team A</b>. ▲ means good for them. Sport sets the exit deadline.</p>
     <div id="games"></div>
   </section>
 
   <section id="portfolio" class="sheet" hidden>
-    <header>
-      <button class="icon close" data-close>✕</button><h2>Portfolio</h2>
+    <div class="sheet-head">
+      <button class="back" data-close aria-label="back">‹</button><h2>Portfolio</h2>
       <span class="spacer"></span>
-      <button id="portfolio-refresh" class="icon text">REFRESH</button>
-    </header>
-    <div id="pf-summary" class="pf-summary"></div>
+      <button id="portfolio-refresh" class="nav-btn">Refresh</button>
+    </div>
+    <div id="pf-summary" class="pf-head"></div>
     <div id="pf-list"></div>
-    <p id="pf-updated" class="small dim"></p>
+    <p id="pf-updated" class="hint"></p>
   </section>
 
   <section id="settings" class="sheet" hidden>
-    <header><button class="icon close" data-close>✕</button><h2>Settings</h2></header>
-    <form id="settings-form"></form>
-    <p id="settings-msg" class="small"></p>
-    <button id="settings-save" class="wide">Save</button>
-    <button id="forget-token" class="wide ghost">Forget token</button>
+    <div class="sheet-head"><button class="back" data-close aria-label="back">‹</button><h2>Settings</h2></div>
+    <div class="setting">
+      <label>Appearance</label>
+      <div class="segmented" id="theme">
+        <button data-theme="system">System</button><button data-theme="light">Light</button><button data-theme="dark">Dark</button>
+      </div>
+    </div>
+    <form id="settings-form" class="settings"></form>
+    <p id="settings-msg" class="hint"></p>
+    <button id="settings-save" class="primary">Save</button>
+    <button id="forget-token" class="ghost">Forget token on this phone</button>
   </section>
 
   <script src="app.js"></script>

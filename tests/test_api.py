@@ -172,3 +172,17 @@ def test_params_round_trip() -> None:
     assert params_from_dict(params_to_dict(p)) == p
     assert params_from_dict({"wait_max_ms": "3000"}).wait_max_ms == 3000
     assert params_from_dict({"unknown": 1}) == TradeParams()
+
+
+async def test_hub_coalesces_quotes_per_market() -> None:
+    import asyncio
+
+    hub = Hub()
+    q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    hub.clients.add(q)
+    hub.publish_quote({"ticker": "A", "yes_bid": 40})
+    hub.publish_quote({"ticker": "A", "yes_bid": 41})  # supersedes A's 40 within 100 ms
+    hub.publish_quote({"ticker": "B", "yes_bid": 59})  # B must not be dropped
+    await asyncio.sleep(0.15)
+    got = {m["ticker"]: m["yes_bid"] for m in [q.get_nowait() for _ in range(q.qsize())]}
+    assert got == {"A": 41, "B": 59}

@@ -343,6 +343,9 @@ Tags: **[docs]** = read in the docs; **[probe]** = needs confirming with `script
   - `portfolio`: Kalshi's view of the account (all open positions, avg cost, live mark, unrealized/realized, fees, cash). `Session` polls it every 3 s while a phone is connected and pushes it to the phone's account card and portfolio screen.
   - `api`: Starlette app plus `Session`. The session holds the selected game, paper/live mode and persisted params (`data/server_state.json`), and resumes after a restart. Endpoints: `/ws` (auth = first message), `POST /api/command` (Bearer fallback), `GET /api/state`, and static `web/`.
   - `web/`: the PWA (plain HTML/CSS/JS, service worker, manifest). The server owns all state; the phone only sends commands and renders snapshots.
+    - The visual style matches Kalshi's mobile web, using tokens read from kalshi.com on 2026-11-24 and listed at the top of `app.css`. Light/dark follow the phone or are set in Settings.
+    - Kalshi Sans is proprietary, so body text uses the system font and condensed text uses Barlow Condensed (OFL, `web/fonts/`). No Kalshi logo or name is used.
+    - Market rows show both teams with Kalshi-style **Yes = ask / No = 100 − bid** prices and chance = mid. They update live, coalesced per market to ≤10/s, and flash green/red on each tick.
   - Still to come: `analysis/`.
   - Scripts: `scripts/probe.py` (M0), `scripts/record.py` (M1), `scripts/replay.py` (recording summary), `scripts/trade.py` (M2 terminal driver, demo only), `scripts/serve.py` (M3 server).
 - Kevin prefers concise, direct communication. Flag assumptions explicitly; when unsure about exchange behavior, verify against docs or demo instead of guessing.

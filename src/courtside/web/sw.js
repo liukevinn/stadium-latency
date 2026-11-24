@@ -1,7 +1,7 @@
 // Network first, cached copy as fallback: updates show up at once, and the shell
 // still loads when stadium signal is bad. API and WebSocket traffic is never cached.
-const CACHE = "courtside-v1";
-const SHELL = ["./", "index.html", "app.js", "app.css", "manifest.webmanifest", "icon.svg", "icon-180.png"];
+const CACHE = "courtside-v2";
+const SHELL = ["./", "index.html", "app.js", "app.css", "manifest.webmanifest", "icon.svg", "icon-180.png", "fonts/BarlowCondensed-500.ttf", "fonts/BarlowCondensed-600.ttf"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
